@@ -237,12 +237,28 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Fetch Production Task Definitions
+        id: fetch_prod
         run: |
-          aws ecs describe-task-definition --task-definition production-devops-assignment-frontend --query taskDefinition > prod-task-def-fe.json || true
-          aws ecs describe-task-definition --task-definition production-devops-assignment-backend --query taskDefinition > prod-task-def-be.json || true
+          if aws ecs describe-task-definition --task-definition production-devops-assignment-frontend --query taskDefinition > prod-task-def-fe.json 2>/dev/null && [ -s prod-task-def-fe.json ]; then
+            echo "has_prod_frontend=true" >> $GITHUB_OUTPUT
+            echo "✅ Production Frontend Task Definition found."
+          else
+            rm -f prod-task-def-fe.json
+            echo "has_prod_frontend=false" >> $GITHUB_OUTPUT
+            echo "ℹ️ Production Frontend task definition not found (staging-only deployment mode active)."
+          fi
+
+          if aws ecs describe-task-definition --task-definition production-devops-assignment-backend --query taskDefinition > prod-task-def-be.json 2>/dev/null && [ -s prod-task-def-be.json ]; then
+            echo "has_prod_backend=true" >> $GITHUB_OUTPUT
+            echo "✅ Production Backend Task Definition found."
+          else
+            rm -f prod-task-def-be.json
+            echo "has_prod_backend=false" >> $GITHUB_OUTPUT
+            echo "ℹ️ Production Backend task definition not found (staging-only deployment mode active)."
+          fi
 
       - name: Render Production Frontend Task Definition
-        if: hashFiles('prod-task-def-fe.json') != ''
+        if: steps.fetch_prod.outputs.has_prod_frontend == 'true'
         id: render-prod-fe
         uses: aws-actions/amazon-ecs-render-task-definition@v1
         with:
@@ -251,7 +267,7 @@ jobs:
           image: ${{ needs.build-and-push.outputs.frontend_image }}
 
       - name: Render Production Backend Task Definition
-        if: hashFiles('prod-task-def-be.json') != ''
+        if: steps.fetch_prod.outputs.has_prod_backend == 'true'
         id: render-prod-be
         uses: aws-actions/amazon-ecs-render-task-definition@v1
         with:
@@ -260,7 +276,7 @@ jobs:
           image: ${{ needs.build-and-push.outputs.backend_image }}
 
       - name: Deploy Frontend to ECS Production
-        if: hashFiles('prod-task-def-fe.json') != ''
+        if: steps.fetch_prod.outputs.has_prod_frontend == 'true'
         uses: aws-actions/amazon-ecs-deploy-task-definition@v2
         with:
           task-definition: ${{ steps.render-prod-fe.outputs.task-definition }}
@@ -269,7 +285,7 @@ jobs:
           wait-for-service-stability: true
 
       - name: Deploy Backend to ECS Production
-        if: hashFiles('prod-task-def-be.json') != ''
+        if: steps.fetch_prod.outputs.has_prod_backend == 'true'
         uses: aws-actions/amazon-ecs-deploy-task-definition@v2
         with:
           task-definition: ${{ steps.render-prod-be.outputs.task-definition }}
@@ -286,6 +302,7 @@ jobs:
             echo "Production Health Probe: http://$PROD_ALB_DNS/api/health"
           else
             echo "prod_url=https://aws.amazon.com/ecs" >> $GITHUB_OUTPUT
+            echo "Production environment standby (staging active)."
           fi
 
   # -------------------------------------------------------------
