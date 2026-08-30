@@ -8,15 +8,15 @@ vpc_cidr     = "10.20.0.0/16"
 enable_nat_gateway = true
 single_nat_gateway = false
 
-# Database: Multi-AZ Failover, Larger Storage, 30-day backups, Deletion Protection
+# Database: Configured for Free Tier account compatibility
 db_name                    = "devops_prod_db"
 db_username                = "prod_admin"
-db_instance_class          = "db.t4g.small"
-db_allocated_storage       = 50
-db_max_allocated_storage   = 200
-db_multi_az                = true
-db_backup_retention_period = 30
-db_deletion_protection     = true
+db_instance_class          = "db.t4g.micro"
+db_allocated_storage       = 20
+db_max_allocated_storage   = 50
+db_multi_az                = false
+db_backup_retention_period = 1
+db_deletion_protection     = false
 
 # Compute: Standard Fargate (On-Demand) with higher replica count & redundancy
 frontend_desired_count = 3
