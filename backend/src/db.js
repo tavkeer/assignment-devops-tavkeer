@@ -1,9 +1,14 @@
 const { Pool } = require('pg');
 const logger = require('./logger');
 
-const isCloudDb = process.env.DB_HOST && process.env.DB_HOST !== 'localhost' && process.env.DB_HOST !== 'postgres';
+const isCloudDb = Boolean(
+  process.env.DB_HOST &&
+  process.env.DB_HOST !== 'localhost' &&
+  process.env.DB_HOST !== 'postgres' &&
+  process.env.DB_HOST !== '127.0.0.1'
+);
 
-const pool = new Pool({
+const poolConfig = {
   host: process.env.DB_HOST || 'localhost',
   port: parseInt(process.env.DB_PORT || '5432', 10),
   database: process.env.DB_NAME || 'devops_db',
@@ -12,8 +17,15 @@ const pool = new Pool({
   max: 20,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 5000,
-  ssl: isCloudDb ? { rejectUnauthorized: false } : false,
-});
+};
+
+if (isCloudDb) {
+  poolConfig.ssl = {
+    rejectUnauthorized: false,
+  };
+}
+
+const pool = new Pool(poolConfig);
 
 pool.on('error', (err) => {
   logger.error('Unexpected error on idle PostgreSQL client', { error: err.message, stack: err.stack });
