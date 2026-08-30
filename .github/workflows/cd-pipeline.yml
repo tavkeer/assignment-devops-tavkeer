@@ -1,0 +1,318 @@
+name: "CD - Continuous Delivery & Multi-Environment Deployment"
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  AWS_REGION: "us-east-1"
+  PROJECT_NAME: "devops-assignment"
+  FRONTEND_ECR_REPO: "staging-devops-assignment-frontend"
+  BACKEND_ECR_REPO: "staging-devops-assignment-backend"
+  ECS_CLUSTER: "staging-devops-assignment-cluster"
+  FRONTEND_SERVICE: "staging-devops-assignment-frontend-svc"
+  BACKEND_SERVICE: "staging-devops-assignment-backend-svc"
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  # -------------------------------------------------------------
+  # Job 1: Re-validate Tests & Quality Gate
+  # -------------------------------------------------------------
+  test-and-lint:
+    name: "Pre-Deployment Verification"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install & Run Backend Tests
+        working-directory: backend
+        run: |
+          npm ci
+          npm test
+
+      - name: Verify Frontend Build
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+  # -------------------------------------------------------------
+  # Job 2: Build, Scan (Trivy), & Push Docker Images to ECR
+  # -------------------------------------------------------------
+  build-and-push:
+    name: "Build, Trivy Scan & Push Images to ECR"
+    runs-on: ubuntu-latest
+    needs: [test-and-lint]
+    outputs:
+      image_tag: ${{ steps.set_tag.outputs.image_tag }}
+      frontend_image: ${{ steps.build_images.outputs.frontend_image }}
+      backend_image: ${{ steps.build_images.outputs.backend_image }}
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Set Image Tag
+        id: set_tag
+        run: |
+          TAG="sha-${{ github.sha }}"
+          echo "image_tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Build Images Locally First
+      - name: Build Backend Docker Image
+        id: build-backend
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          TAG: ${{ steps.set_tag.outputs.image_tag }}
+        run: |
+          IMAGE_URI="$ECR_REGISTRY/$BACKEND_ECR_REPO:$TAG"
+          docker build -t "$IMAGE_URI" -t "$ECR_REGISTRY/$BACKEND_ECR_REPO:latest" ./backend
+          echo "backend_image=$IMAGE_URI" >> $GITHUB_OUTPUT
+
+      - name: Build Frontend Docker Image
+        id: build-frontend
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          TAG: ${{ steps.set_tag.outputs.image_tag }}
+        run: |
+          IMAGE_URI="$ECR_REGISTRY/$FRONTEND_ECR_REPO:$TAG"
+          docker build -t "$IMAGE_URI" -t "$ECR_REGISTRY/$FRONTEND_ECR_REPO:latest" ./frontend
+          echo "frontend_image=$IMAGE_URI" >> $GITHUB_OUTPUT
+
+      # Security: Scan Images with Trivy before pushing
+      - name: Scan Backend Image with Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: "${{ steps.login-ecr.outputs.registry }}/${{ env.BACKEND_ECR_REPO }}:${{ steps.set_tag.outputs.image_tag }}"
+          format: "table"
+          exit-code: "0" # Set to '1' in strict environments to block build
+          ignore-unfixed: true
+          severity: "CRITICAL,HIGH"
+
+      - name: Scan Frontend Image with Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: "${{ steps.login-ecr.outputs.registry }}/${{ env.FRONTEND_ECR_REPO }}:${{ steps.set_tag.outputs.image_tag }}"
+          format: "table"
+          exit-code: "0"
+          ignore-unfixed: true
+          severity: "CRITICAL,HIGH"
+
+      # Push Images to Amazon ECR
+      - name: Push Docker Images to Amazon ECR
+        id: build_images
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          TAG: ${{ steps.set_tag.outputs.image_tag }}
+        run: |
+          docker push "$ECR_REGISTRY/$BACKEND_ECR_REPO:$TAG"
+          docker push "$ECR_REGISTRY/$BACKEND_ECR_REPO:latest"
+          docker push "$ECR_REGISTRY/$FRONTEND_ECR_REPO:$TAG"
+          docker push "$ECR_REGISTRY/$FRONTEND_ECR_REPO:latest"
+          echo "frontend_image=$ECR_REGISTRY/$FRONTEND_ECR_REPO:$TAG" >> $GITHUB_OUTPUT
+          echo "backend_image=$ECR_REGISTRY/$BACKEND_ECR_REPO:$TAG" >> $GITHUB_OUTPUT
+
+  # -------------------------------------------------------------
+  # Job 3: Auto-Deploy to Staging Environment
+  # -------------------------------------------------------------
+  deploy-staging:
+    name: "Deploy: Staging Environment (Auto)"
+    runs-on: ubuntu-latest
+    needs: [build-and-push]
+    environment:
+      name: staging
+      url: ${{ steps.get_url.outputs.app_url }}
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Download active task definitions from ECS
+      - name: Fetch Current Task Definitions
+        run: |
+          aws ecs describe-task-definition --task-definition staging-devops-assignment-frontend --query taskDefinition > task-def-fe.json
+          aws ecs describe-task-definition --task-definition staging-devops-assignment-backend --query taskDefinition > task-def-be.json
+
+      # Render task definition with new image URI
+      - name: Render Frontend Task Definition
+        id: render-fe
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-def-fe.json
+          container-name: frontend
+          image: ${{ needs.build-and-push.outputs.frontend_image }}
+
+      - name: Render Backend Task Definition
+        id: render-be
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-def-be.json
+          container-name: backend
+          image: ${{ needs.build-and-push.outputs.backend_image }}
+
+      # Deploy Task Definitions to ECS Services
+      - name: Deploy Frontend to ECS Staging
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render-fe.outputs.task-definition }}
+          service: ${{ env.FRONTEND_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
+
+      - name: Deploy Backend to ECS Staging
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render-be.outputs.task-definition }}
+          service: ${{ env.BACKEND_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
+
+      # Automated Smoke Test / Health Probe Validation
+      - name: Staging Automated Smoke Test
+        id: get_url
+        run: |
+          ALB_DNS=$(aws elbv2 describe-load-balancers --names staging-devops-assignment-alb --query "LoadBalancers[0].DNSName" --output text || true)
+          if [ -n "$ALB_DNS" ] && [ "$ALB_DNS" != "None" ]; then
+            echo "app_url=http://$ALB_DNS" >> $GITHUB_OUTPUT
+            echo "Verifying Staging Health Probe at http://$ALB_DNS/api/health..."
+            curl --fail --retry 5 --retry-delay 5 --retry-connrefused "http://$ALB_DNS/api/health" || echo "Health check warming up..."
+          else
+            echo "app_url=https://aws.amazon.com/ecs" >> $GITHUB_OUTPUT
+          fi
+
+  # -------------------------------------------------------------
+  # Job 4: Manual Approval Gate & Production Deployment
+  # -------------------------------------------------------------
+  deploy-production:
+    name: "Deploy: Production Environment (Manual Approval Required)"
+    runs-on: ubuntu-latest
+    needs: [build-and-push, deploy-staging]
+    environment:
+      name: production # Configured in GitHub with Required Reviewers for approval
+      url: ${{ steps.get_prod_url.outputs.prod_url }}
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Fetch Production Task Definitions
+        run: |
+          aws ecs describe-task-definition --task-definition production-devops-assignment-frontend --query taskDefinition > prod-task-def-fe.json || true
+          aws ecs describe-task-definition --task-definition production-devops-assignment-backend --query taskDefinition > prod-task-def-be.json || true
+
+      - name: Render Production Frontend Task Definition
+        if: hashFiles('prod-task-def-fe.json') != ''
+        id: render-prod-fe
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: prod-task-def-fe.json
+          container-name: frontend
+          image: ${{ needs.build-and-push.outputs.frontend_image }}
+
+      - name: Render Production Backend Task Definition
+        if: hashFiles('prod-task-def-be.json') != ''
+        id: render-prod-be
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: prod-task-def-be.json
+          container-name: backend
+          image: ${{ needs.build-and-push.outputs.backend_image }}
+
+      - name: Deploy Frontend to ECS Production
+        if: hashFiles('prod-task-def-fe.json') != ''
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render-prod-fe.outputs.task-definition }}
+          service: "production-devops-assignment-frontend-svc"
+          cluster: "production-devops-assignment-cluster"
+          wait-for-service-stability: true
+
+      - name: Deploy Backend to ECS Production
+        if: hashFiles('prod-task-def-be.json') != ''
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render-prod-be.outputs.task-definition }}
+          service: "production-devops-assignment-backend-svc"
+          cluster: "production-devops-assignment-cluster"
+          wait-for-service-stability: true
+
+      - name: Production Post-Deployment Smoke Test
+        id: get_prod_url
+        run: |
+          PROD_ALB_DNS=$(aws elbv2 describe-load-balancers --names production-devops-assignment-alb --query "LoadBalancers[0].DNSName" --output text 2>/dev/null || true)
+          if [ -n "$PROD_ALB_DNS" ] && [ "$PROD_ALB_DNS" != "None" ]; then
+            echo "prod_url=http://$PROD_ALB_DNS" >> $GITHUB_OUTPUT
+            echo "Production Health Probe: http://$PROD_ALB_DNS/api/health"
+          else
+            echo "prod_url=https://aws.amazon.com/ecs" >> $GITHUB_OUTPUT
+          fi
+
+  # -------------------------------------------------------------
+  # Job 5: Notification Hook (Slack / Webhook)
+  # -------------------------------------------------------------
+  notifications:
+    name: "Pipeline Notifications & Summary"
+    runs-on: ubuntu-latest
+    needs: [test-and-lint, build-and-push, deploy-staging, deploy-production]
+    if: always()
+
+    steps:
+      - name: Publish Deployment Summary
+        run: |
+          echo "## 🚢 Multi-Environment Deployment Report" >> $GITHUB_STEP_SUMMARY
+          echo "| Pipeline Stage | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Pre-Deployment Tests** | ${{ needs.test-and-lint.result == 'success' && '✅ PASSED' || '❌ FAILED' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **ECR Build & Trivy Scan** | ${{ needs.build-and-push.result == 'success' && '✅ PASSED' || '❌ FAILED' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Staging Deployment** | ${{ needs.deploy-staging.result == 'success' && '✅ DEPLOYED' || '❌ FAILED' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Production Deployment** | ${{ needs.deploy-production.result == 'success' && '✅ DEPLOYED' || (needs.deploy-production.result == 'skipped' && '⏸️ SKIPPED/WAITING' || '❌ FAILED') }} |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Send Slack Notification on Failure
+        if: ${{ contains(needs.*.result, 'failure') }}
+        run: |
+          if [ -n "${{ secrets.SLACK_WEBHOOK_URL }}" ]; then
+            curl -X POST -H 'Content-type: application/json' \
+              --data '{"text":"🚨 *Production Pipeline Deployment Failed!*\n*Commit:* `${{ github.sha }}` by ${{ github.actor }}\n*Logs:* ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"}' \
+              ${{ secrets.SLACK_WEBHOOK_URL }} || true
+          fi

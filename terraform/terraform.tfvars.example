@@ -1,0 +1,27 @@
+# Example terraform.tfvars
+project_name        = "devops-assignment"
+environment         = "staging"
+aws_region          = "us-east-1"
+vpc_cidr            = "10.0.0.0/16"
+enable_nat_gateway  = true
+single_nat_gateway  = true
+
+# Database Configuration
+db_name             = "devops_db"
+db_username         = "devops_admin"
+db_instance_class   = "db.t4g.micro"
+db_allocated_storage = 20
+db_multi_az         = false
+
+# ECS Tasks Configuration
+frontend_desired_count = 2
+backend_desired_count  = 2
+use_fargate_spot       = true
+log_retention_days     = 14
+
+tags = {
+  Environment = "staging"
+  Owner       = "devops-team"
+  Terraform   = "true"
+}
+
