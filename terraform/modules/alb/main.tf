@@ -1,7 +1,7 @@
 # ALB Module: Application Load Balancer with Multi-Target Routing
 
 resource "aws_lb" "main" {
-  name               = "${var.environment}-${var.project_name}-alb"
+  name               = substr("${var.environment}-${var.project_name}-alb", 0, 32)
   internal           = false
   load_balancer_type = "application"
   security_groups    = [var.security_group_id]
@@ -20,7 +20,7 @@ resource "aws_lb" "main" {
 
 # Frontend Target Group (Port 80)
 resource "aws_lb_target_group" "frontend" {
-  name                 = "${var.environment}-${var.project_name}-fe-tg"
+  name                 = substr("${var.environment}-${var.project_name}-fe-tg", 0, 32)
   port                 = 80
   protocol             = "HTTP"
   vpc_id               = var.vpc_id
@@ -50,7 +50,7 @@ resource "aws_lb_target_group" "frontend" {
 
 # Backend Target Group (Port 5000)
 resource "aws_lb_target_group" "backend" {
-  name                 = "${var.environment}-${var.project_name}-be-tg"
+  name                 = substr("${var.environment}-${var.project_name}-be-tg", 0, 32)
   port                 = 5000
   protocol             = "HTTP"
   vpc_id               = var.vpc_id
