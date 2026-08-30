@@ -8,7 +8,7 @@ register.setDefaultLabels({
   app: 'devops-assignment-api',
 });
 
-// Enable collection of default runtime metrics (Memory, CPU, Event loop, GC)
+// Enable collection of default runtime metrics   (Memory, CPU, Event loop, GC)
 client.collectDefaultMetrics({ register });
 
 // Custom RED Metrics: Rate, Errors, Duration
