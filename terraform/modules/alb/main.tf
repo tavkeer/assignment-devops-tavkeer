@@ -1,7 +1,12 @@
 # ALB Module: Application Load Balancer with Multi-Target Routing
 
+locals {
+  # Keep name under AWS 32-character limit for ALB/Target Groups without trailing hyphens
+  name_prefix = var.environment == "production" ? "prod-${var.project_name}" : "${var.environment}-${var.project_name}"
+}
+
 resource "aws_lb" "main" {
-  name               = substr("${var.environment}-${var.project_name}-alb", 0, 32)
+  name               = "${local.name_prefix}-alb"
   internal           = false
   load_balancer_type = "application"
   security_groups    = [var.security_group_id]
@@ -20,7 +25,7 @@ resource "aws_lb" "main" {
 
 # Frontend Target Group (Port 80)
 resource "aws_lb_target_group" "frontend" {
-  name                 = substr("${var.environment}-${var.project_name}-fe-tg", 0, 32)
+  name                 = "${local.name_prefix}-fe-tg"
   port                 = 80
   protocol             = "HTTP"
   vpc_id               = var.vpc_id
@@ -50,7 +55,7 @@ resource "aws_lb_target_group" "frontend" {
 
 # Backend Target Group (Port 5000)
 resource "aws_lb_target_group" "backend" {
-  name                 = substr("${var.environment}-${var.project_name}-be-tg", 0, 32)
+  name                 = "${local.name_prefix}-be-tg"
   port                 = 5000
   protocol             = "HTTP"
   vpc_id               = var.vpc_id
