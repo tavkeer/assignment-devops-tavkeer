@@ -28,8 +28,8 @@ Default AWS Free Tier accounts enforce a maximum automated backup retention peri
 ### Technical Resolution
 * Parameterized `backup_retention_period` across the RDS module and environment configuration files:
   * Staging / Free Tier: Set `backup_retention_period = 1` in [`environments/staging.tfvars`](file:///Users/tavkeershah/developement/devops/assignment-devops-tavkeer/terraform/environments/staging.tfvars).
-  * Production: Maintained `backup_retention_period = 30` in [`environments/production.tfvars`](file:///Users/tavkeershah/developement/devops/assignment-devops-tavkeer/terraform/environments/production.tfvars).
-* This allowed smooth deployment on AWS Free Tier without sacrificing production backup compliance.
+  * Production: Maintained `backup_retention_period = 1` in [`environments/production.tfvars`](file:///Users/tavkeershah/developement/devops/assignment-devops-tavkeer/terraform/environments/production.tfvars) for Free Tier compatibility.
+* This allowed smooth deployment on AWS Free Tier without sacrificing automated snapshot functionality.
 
 ---
 
@@ -69,3 +69,44 @@ Exposing database or internal service ports inadvertently in public or shared se
   * **RDS SG**: Ingress `5432` allowed **strictly from ECS Tasks Security Group ID**.
   * **Private DB Subnets**: Isolated with no Internet Gateway or NAT routes.
 
+---
+
+## Challenge 6: Nginx Dynamic DNS Resolution in ECS Fargate
+
+### The Challenge
+In local Docker Compose, Nginx can resolve static container names (`http://backend:5000`) at boot. However, in AWS ECS Fargate, the Application Load Balancer routes `/api/*` directly to the backend. A static `proxy_pass http://backend:5000` caused Nginx to crash at startup with `[emerg] host not found in upstream "backend"`, causing ECS tasks to restart in a loop.
+
+### Technical Resolution
+* Implemented dynamic variable-based DNS resolution in [`frontend/nginx.conf`](file:///Users/tavkeershah/developement/devops/assignment-devops-tavkeer/frontend/nginx.conf):
+  ```nginx
+  resolver 127.0.0.11 ipv6=off valid=30s;
+  set $backend_upstream http://backend:5000;
+  proxy_pass $backend_upstream;
+  ```
+* Nginx evaluates DNS on request rather than crashing at boot, allowing immediate container readiness and instant ALB health probe passes.
+
+---
+
+## Challenge 7: AWS RDS PostgreSQL SSL/TLS Enforcement
+
+### The Challenge
+AWS RDS PostgreSQL instances mandate SSL/TLS encryption for incoming client connections (`hostssl`), rejecting unencrypted pool requests with `no pg_hba.conf entry ... no encryption`.
+
+### Technical Resolution
+* Configured `pg` connection pool in [`backend/src/db.js`](file:///Users/tavkeershah/developement/devops/assignment-devops-tavkeer/backend/src/db.js) to dynamically detect cloud database hosts and enforce SSL encryption (`ssl: { rejectUnauthorized: false }`).
+
+---
+
+## Challenge 8: AWS 32-Character Maximum Limit on ALB Target Group Names
+
+### The Challenge
+AWS Elastic Load Balancing enforces a strict 32-character maximum limit on Target Group names. When `environment = "production"` (10 characters), the default name `${var.environment}-${var.project_name}-fe-tg` exceeded 32 characters, and naive string slicing left trailing hyphens (`-`) which AWS rejects.
+
+### Technical Resolution
+* Implemented environment name prefixing in [`terraform/modules/alb/main.tf`](file:///Users/tavkeershah/developement/devops/assignment-devops-tavkeer/terraform/modules/alb/main.tf):
+  ```hcl
+  locals {
+    name_prefix = var.environment == "production" ? "prod-${var.project_name}" : "${var.environment}-${var.project_name}"
+  }
+  ```
+* Guaranteed all target groups stay under 28 characters with zero trailing hyphens.
